@@ -1,0 +1,35 @@
+# FastAPI and ASGI server
+fastapi>=0.120.0
+uvicorn[standard]>=0.38.0
+
+# Database
+motor>=3.7.0
+pymongo>=4.15.0
+
+# Data validation and settings
+pydantic>=2.12.0
+pydantic-settings>=2.11.0
+
+# Excel processing
+openpyxl>=3.1.5
+xlrd>=2.0.2
+pandas>=2.3.0
+
+# HTTP client
+httpx>=0.28.0
+
+# Utilities
+python-multipart>=0.0.20
+python-dotenv>=1.2.0
+
+# Authentication
+bcrypt>=4.0.1
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+
+# Development
+pytest>=8.4.0
+pytest-asyncio>=1.2.0
+black>=25.9.0
+isort>=7.0.0
+flake8>=7.3.0
