@@ -1,6 +1,7 @@
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import logging
+import re
 from app.services.database import get_database
 from app.core.collections import (
     COLLECTION_SLA_GALPAO_ENTRADAS, 

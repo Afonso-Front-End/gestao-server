@@ -134,9 +134,13 @@ class BipagensProcessor:
     
     def _deduplicar_por_data_recente(self, dados: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Deduplica pedidos mantendo apenas o registro com data mais recente
+        Deduplica pedidos mantendo o melhor registro:
+        - Prioriza registros com "Correio de coleta ou entrega" preenchido
+        - Se o último bipe não tiver motorista, busca o último bipe que tenha motorista
+        - Se todos tiverem motorista, mantém o mais recente
         """
-        pedidos_dict = {}
+        # Agrupar todos os registros por número de pedido
+        pedidos_agrupados = {}
         
         for item in dados:
             numero_pedido = str(item.get('Número de pedido JMS', '')).strip()
@@ -144,7 +148,6 @@ class BipagensProcessor:
                 continue
             
             # Remover pedidos filhos (formato: 888001152307637-001, 888001152307637-002, etc.)
-            # Verificar se é pedido filho (tem hífen seguido de números, ponto seguido de números, ou letra no final)
             is_child = bool(
                 re.search(r"\.\d+$", numero_pedido) or 
                 re.search(r"-\d+$", numero_pedido) or 
@@ -177,20 +180,57 @@ class BipagensProcessor:
             except:
                 continue
             
-            # Se não existe ou se a data é mais recente, substituir
-            if numero_pedido not in pedidos_dict:
-                pedidos_dict[numero_pedido] = item
-                pedidos_dict[numero_pedido]['_tempo_digitalizacao'] = tempo_digitalizacao
+            # Adicionar ao grupo de pedidos
+            if numero_pedido not in pedidos_agrupados:
+                pedidos_agrupados[numero_pedido] = []
+            
+            item['_tempo_digitalizacao'] = tempo_digitalizacao
+            pedidos_agrupados[numero_pedido].append(item)
+        
+        # Para cada pedido, escolher o melhor registro
+        pedidos_finais = []
+        
+        for numero_pedido, registros in pedidos_agrupados.items():
+            # Ordenar por data (mais recente primeiro)
+            registros.sort(key=lambda x: x['_tempo_digitalizacao'], reverse=True)
+            
+            # Verificar se algum registro tem "Correio de coleta ou entrega" preenchido
+            registros_com_motorista = []
+            registros_sem_motorista = []
+            
+            for registro in registros:
+                correio = str(registro.get('Correio de coleta ou entrega', '')).strip()
+                tem_motorista = correio and correio != ''
+                
+                if tem_motorista:
+                    registros_com_motorista.append(registro)
+                else:
+                    registros_sem_motorista.append(registro)
+            
+            # Escolher o melhor registro:
+            # 1. Se houver registros com motorista, pegar o mais recente que tenha motorista
+            # 2. Se não houver nenhum com motorista, pegar o mais recente (mesmo sem motorista)
+            if registros_com_motorista:
+                # Pegar o mais recente que tenha motorista
+                melhor_registro = registros_com_motorista[0]
+                tipo_bipagem = melhor_registro.get('Tipo de bipagem', '')
+                correio = str(melhor_registro.get('Correio de coleta ou entrega', '')).strip()
+                logger.info(f"✅ Pedido {numero_pedido}: Escolhido registro COM MOTORISTA - Tipo: {tipo_bipagem}, Motorista: {correio}, Data: {melhor_registro['_tempo_digitalizacao']}")
+                if len(registros_com_motorista) > 1:
+                    logger.info(f"   ℹ️ Total de {len(registros_com_motorista)} registros com motorista encontrados para este pedido")
             else:
-                if tempo_digitalizacao > pedidos_dict[numero_pedido]['_tempo_digitalizacao']:
-                    pedidos_dict[numero_pedido] = item
-                    pedidos_dict[numero_pedido]['_tempo_digitalizacao'] = tempo_digitalizacao
+                # Se não houver nenhum com motorista, pegar o mais recente
+                melhor_registro = registros[0]
+                tipo_bipagem = melhor_registro.get('Tipo de bipagem', '')
+                logger.warning(f"⚠️ Pedido {numero_pedido}: NENHUM registro com motorista encontrado! Total de registros: {len(registros)}")
+                logger.warning(f"   ⚠️ Usando o mais recente (Tipo: {tipo_bipagem}, Data: {melhor_registro['_tempo_digitalizacao']})")
+                logger.warning(f"   ⚠️ Este pedido NÃO será salvo na coleção (sem motorista)")
+            
+            # Remover campo auxiliar
+            melhor_registro.pop('_tempo_digitalizacao', None)
+            pedidos_finais.append(melhor_registro)
         
-        # Remover campo auxiliar
-        for item in pedidos_dict.values():
-            item.pop('_tempo_digitalizacao', None)
-        
-        return list(pedidos_dict.values())
+        return pedidos_finais
     
     async def _buscar_dados_completos(self, dados_bipagens: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -259,13 +299,16 @@ class BipagensProcessor:
             if is_child:
                 continue  # Pular pedidos filhos
             
-            # PRIMEIRO: Verificar se "Correio de coleta ou entrega" está vazio ANTES de buscar no d1_chunks
-            # Se estiver vazio, NÃO salvar - pular este pedido imediatamente
+            # Verificar se "Correio de coleta ou entrega" está preenchido
+            # Com a nova lógica de deduplicação, sempre escolhemos um registro com motorista se houver
+            # Mas ainda verificamos aqui como segurança
             correio = str(item_bipagem.get('Correio de coleta ou entrega', '')).strip()
             correio_vazio = not correio or correio == '' or correio.strip() == ''
             
             if correio_vazio:
-                logger.info(f"📋 Pedido {numero_pedido} (ÚLTIMO BIPE) SEM MOTORISTA - Correio vazio. NÃO será salvo na coleção.")
+                tipo_bipagem = item_bipagem.get('Tipo de bipagem', '')
+                logger.warning(f"⚠️ Pedido {numero_pedido} SEM MOTORISTA após deduplicação - Tipo: {tipo_bipagem}, Correio vazio. NÃO será salvo na coleção.")
+                logger.warning(f"   ⚠️ Isso pode indicar que todos os registros deste pedido não tinham motorista.")
                 continue
             
             # Buscar pedido no dicionário
