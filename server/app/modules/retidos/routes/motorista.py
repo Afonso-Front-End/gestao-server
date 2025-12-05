@@ -182,8 +182,8 @@ async def salvar_status_motorista(
         if db is None:
             raise HTTPException(status_code=500, detail="Database não está conectado")
         
-        # Usar uma coleção específica para status dos motoristas
-        collection_name = "motoristas_status"
+        # Usar coleção específica para status dos motoristas Pedidos Retidos
+        collection_name = "motoristas_status_pedidos_retidos"
         collection = db[collection_name]
         
         status_value = status_data.status  # Pode ser 'ok', 'no', 'pendente', 'sem_telefone' ou null
@@ -275,7 +275,7 @@ async def obter_todos_status():
         if db is None:
             raise HTTPException(status_code=500, detail="Database não está conectado")
         
-        collection_name = "motoristas_status"
+        collection_name = "motoristas_status_pedidos_retidos"
         collection = db[collection_name]
         
         # Buscar todos os status
@@ -285,6 +285,9 @@ async def obter_todos_status():
         async for doc in cursor:
             # Remover _id do MongoDB para serialização
             doc.pop('_id', None)
+            # Garantir que tenha o campo observacao (mesmo que vazio)
+            if 'observacao' not in doc:
+                doc['observacao'] = ''
             statuses.append(doc)
         
         return {
@@ -307,7 +310,7 @@ async def obter_status_motorista(motorista: str, base: str | None = None):
         if db is None:
             raise HTTPException(status_code=500, detail="Database não está conectado")
         
-        collection_name = "motoristas_status"
+        collection_name = "motoristas_status_pedidos_retidos"
         collection = db[collection_name]
         
         # Buscar usando chave composta (responsavel + base)
@@ -332,6 +335,7 @@ async def obter_status_motorista(motorista: str, base: str | None = None):
                 "status": doc.get("status"),
                 "responsavel": doc.get("responsavel"),
                 "base": doc.get("base"),
+                "observacao": doc.get("observacao", ""),
                 "updated_at": doc.get("updated_at")
             }
         else:

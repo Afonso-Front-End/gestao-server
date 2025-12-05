@@ -84,20 +84,30 @@ async def get_d1_pedidos(
                 match_query["tempo_pedido_parado"] = {"$in": tempos_list}
             
             # Pipeline para buscar pedidos da coleção bipagens
+            # IMPORTANTE: Primeiro agrupar por número de pedido para pegar apenas a bipagem mais recente
             pipeline = [
                 # Filtrar apenas pedidos com motorista e das bases selecionadas
                 {"$match": match_query},
-                # Extrair número de pedido
-                {"$project": {
-                    "numero_pedido": "$numero_pedido_jms"
+                # Ordenar por número de pedido e tempo de digitalização (mais recente primeiro)
+                {"$sort": {
+                    "numero_pedido_jms": 1,
+                    "tempo_digitalizacao": -1
                 }},
+                # Agrupar por número de pedido e pegar apenas o primeiro registro (mais recente)
+                {"$group": {
+                    "_id": "$numero_pedido_jms",
+                    # Pegar todos os campos do documento mais recente
+                    "doc": {"$first": "$$ROOT"}
+                }},
+                # Substituir o documento agrupado pelo documento original
+                {"$replaceRoot": {"newRoot": "$doc"}},
                 # Filtrar apenas valores não-nulos e não-vazios
                 {"$match": {
-                    "numero_pedido": {"$exists": True, "$ne": None, "$ne": ""}
+                    "numero_pedido_jms": {"$exists": True, "$ne": None, "$ne": ""}
                 }},
                 # Converter para string para processamento
                 {"$addFields": {
-                    "numero_str": {"$toString": "$numero_pedido"}
+                    "numero_str": {"$toString": "$numero_pedido_jms"}
                 }},
                 # Filtrar apenas pedidos "pais" (remover filhos)
                 {"$match": {
@@ -110,17 +120,13 @@ async def get_d1_pedidos(
                         }
                     }
                 }},
-                # Agrupar por número de pedido para obter valores únicos
-                {"$group": {
-                    "_id": "$numero_pedido"
-                }},
-                # Ordenar
-                {"$sort": {"_id": 1}},
                 # Projetar apenas o número do pedido
                 {"$project": {
                     "_id": 0,
-                    "numero_pedido": "$_id"
-                }}
+                    "numero_pedido": "$numero_pedido_jms"
+                }},
+                # Ordenar
+                {"$sort": {"numero_pedido": 1}}
             ]
         else:
             # Buscar de chunks (comportamento antigo)

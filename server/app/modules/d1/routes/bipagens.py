@@ -77,15 +77,17 @@ async def listar_bipagens(
         db = get_database()
         collection = db[COLLECTION_D1_BIPAGENS]
         
-        # Construir query
-        # Filtrar apenas pedidos que estão com motorista (não digitalizadores)
-        query = {'esta_com_motorista': True}
+        # Pipeline de agregação para pegar apenas a bipagem mais recente de cada pedido
+        # IMPORTANTE: Primeiro agrupar por número de pedido para pegar apenas a bipagem mais recente
+        
+        # Construir match inicial
+        match_query = {}
         
         if base:
             bases_list = [b.strip() for b in base.split(',') if b.strip()]
             if bases_list:
                 # Filtrar por base_entrega OU base_destino
-                query['$or'] = [
+                match_query['$or'] = [
                     {'base_entrega': {'$in': bases_list}},
                     {'base_destino': {'$in': bases_list}}
                 ]
@@ -93,16 +95,54 @@ async def listar_bipagens(
         if tempo_parado:
             tempos_list = [t.strip() for t in tempo_parado.split(',') if t.strip()]
             if tempos_list:
-                query['tempo_pedido_parado'] = {'$in': tempos_list}
+                match_query['tempo_pedido_parado'] = {'$in': tempos_list}
         
-        # Contar total
-        total = await collection.count_documents(query)
+        # Pipeline de agregação
+        pipeline = [
+            # Primeiro match: aplicar filtros iniciais (base, tempo_parado)
+            {'$match': match_query} if match_query else {'$match': {}},
+            
+            # Ordenar por número de pedido e tempo de digitalização (mais recente primeiro)
+            {'$sort': {
+                'numero_pedido_jms': 1,
+                'tempo_digitalizacao': -1
+            }},
+            
+            # Agrupar por número de pedido e pegar apenas o primeiro registro (mais recente)
+            {'$group': {
+                '_id': '$numero_pedido_jms',
+                # Pegar todos os campos do documento mais recente
+                'doc': {'$first': '$$ROOT'}
+            }},
+            
+            # Substituir o documento agrupado pelo documento original
+            {'$replaceRoot': {'newRoot': '$doc'}},
+            
+            # Filtrar apenas pedidos que estão com motorista (não digitalizadores)
+            {'$match': {
+                'esta_com_motorista': True
+            }},
+            
+            # Ordenar por updated_at (mais recente primeiro)
+            {'$sort': {'updated_at': -1}},
+        ]
         
-        # Buscar dados
-        cursor = collection.find(query).sort('updated_at', -1).skip(skip).limit(limit)
+        # Contar total (executar pipeline sem limit/skip)
+        count_pipeline = pipeline + [{'$count': 'total'}]
+        total = 0
+        async for doc in collection.aggregate(count_pipeline):
+            total = doc.get('total', 0)
+            break
+        
+        # Aplicar skip e limit
+        pipeline.extend([
+            {'$skip': skip},
+            {'$limit': limit}
+        ])
+        
+        # Executar pipeline
         documentos = []
-        
-        async for doc in cursor:
+        async for doc in collection.aggregate(pipeline):
             # Converter ObjectId para string
             doc['_id'] = str(doc['_id'])
             # Converter datetime para string
@@ -173,18 +213,37 @@ async def listar_motoristas_agrupados(
                 match_query['cidade_destino'] = {'$in': cidades_list}
         
         # Pipeline de agregação
-        # Agrupar por responsavel_entrega (apenas motoristas, não digitalizadores)
-        # Filtrar apenas pedidos que estão com motorista (esta_com_motorista = True)
-        match_query['esta_com_motorista'] = True
+        # IMPORTANTE: Primeiro agrupar por número de pedido para pegar apenas a bipagem mais recente
+        # Depois agrupar por motorista para contar os pedidos
         
         pipeline = [
-            {'$match': match_query},
-            # Filtrar documentos onde responsavel_entrega não está vazio
-            # E garantir que esta_com_motorista seja True (não são digitalizadores)
+            # Primeiro match: aplicar filtros iniciais (base, tempo_parado, cidade)
+            {'$match': match_query} if match_query else {'$match': {}},
+            
+            # Ordenar por número de pedido e tempo de digitalização (mais recente primeiro)
+            {'$sort': {
+                'numero_pedido_jms': 1,
+                'tempo_digitalizacao': -1
+            }},
+            
+            # Agrupar por número de pedido e pegar apenas o primeiro registro (mais recente)
+            {'$group': {
+                '_id': '$numero_pedido_jms',
+                # Pegar todos os campos do documento mais recente
+                'doc': {'$first': '$$ROOT'}
+            }},
+            
+            # Substituir o documento agrupado pelo documento original
+            {'$replaceRoot': {'newRoot': '$doc'}},
+            
+            # Agora filtrar apenas pedidos que estão com motorista (esta_com_motorista = True)
+            # E que têm responsavel_entrega preenchido
             {'$match': {
                 'responsavel_entrega': {'$exists': True, '$ne': '', '$ne': None},
                 'esta_com_motorista': True
             }},
+            
+            # Agora agrupar por responsavel_entrega (motorista) para contar pedidos
             {'$group': {
                 '_id': '$responsavel_entrega',
                 'base_entrega': {'$first': '$base_entrega'},
@@ -466,6 +525,44 @@ async def atualizar_marca_assinatura(file: UploadFile = File(...)):
         logger.error(f"Erro ao atualizar marca de assinatura: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
+@router.get("/bipagens/motorista/all-status")
+async def obter_todos_status_d1():
+    """
+    Obtém todos os status salvos dos motoristas D1 (para carregar observações ao iniciar)
+    """
+    try:
+        db = get_database()
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database não está conectado")
+        
+        collection_name = "motoristas_status_d1"
+        collection = db[collection_name]
+        
+        # Buscar todos os status de motoristas D1
+        cursor = collection.find({})
+        statuses = []
+        
+        async for doc in cursor:
+            # Remover _id do MongoDB para serialização
+            doc.pop('_id', None)
+            # Garantir que tenha o campo responsavel (pode ser motorista ou responsavel)
+            if 'motorista' in doc and 'responsavel' not in doc:
+                doc['responsavel'] = doc['motorista']
+            # Garantir que tenha o campo observacao (mesmo que vazio)
+            if 'observacao' not in doc:
+                doc['observacao'] = ''
+            statuses.append(doc)
+        
+        return {
+            "success": True,
+            "statuses": statuses,
+            "total": len(statuses)
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao obter todos os status D1: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+
 @router.get("/bipagens/motorista/{motorista}")
 async def listar_pedidos_motorista(
     motorista: str,
@@ -475,6 +572,7 @@ async def listar_pedidos_motorista(
 ):
     """
     Lista todos os pedidos de um motorista específico
+    IMPORTANTE: Retorna apenas pedidos onde o motorista é o responsável na BIPAGEM MAIS RECENTE
     
     Args:
         motorista: Nome do motorista (URL encoded)
@@ -489,63 +587,86 @@ async def listar_pedidos_motorista(
         db = get_database()
         collection = db[COLLECTION_D1_BIPAGENS]
         
-        # Construir query base
-        query = {'responsavel_entrega': motorista_decoded}
+        # Construir match inicial - buscar todos os pedidos (sem filtrar por motorista ainda)
+        match_stage = {}
         
         # Construir condições de base
-        base_conditions = []
         if base:
             bases_list = [b.strip() for b in base.split(',') if b.strip()]
             if bases_list:
                 # Filtrar por base_entrega OU base_destino
-                base_conditions = [
+                match_stage['$or'] = [
                     {'base_entrega': {'$in': bases_list}},
                     {'base_destino': {'$in': bases_list}}
                 ]
         
-        # Construir lista de condições adicionais para $and
-        additional_conditions = []
+        # Pipeline de agregação para pegar apenas a bipagem mais recente de cada pedido
+        pipeline = [
+            # Primeiro match: aplicar filtros de base (se houver)
+            {'$match': match_stage} if match_stage else {'$match': {}},
+            
+            # Ordenar por número de pedido e tempo de digitalização (mais recente primeiro)
+            {'$sort': {
+                'numero_pedido_jms': 1,
+                'tempo_digitalizacao': -1
+            }},
+            
+            # Agrupar por número de pedido e pegar apenas o primeiro registro (mais recente)
+            {'$group': {
+                '_id': '$numero_pedido_jms',
+                # Pegar todos os campos do documento mais recente
+                'doc': {'$first': '$$ROOT'}
+            }},
+            
+            # Substituir o documento agrupado pelo documento original
+            {'$replaceRoot': {'newRoot': '$doc'}},
+            
+            # Agora filtrar apenas os que têm o motorista correto na bipagem mais recente
+            {'$match': {
+                'responsavel_entrega': motorista_decoded,
+                'esta_com_motorista': True
+            }},
+            
+            # Aplicar filtros adicionais (tempo_parado e status)
+        ]
         
+        # Adicionar filtro de tempo_parado se fornecido
         if tempo_parado:
             tempos_list = [t.strip() for t in tempo_parado.split(',') if t.strip()]
             if tempos_list:
-                additional_conditions.append({'tempo_pedido_parado': {'$in': tempos_list}})
+                pipeline.append({
+                    '$match': {'tempo_pedido_parado': {'$in': tempos_list}}
+                })
         
         # Filtrar por status (entregue ou não entregue)
         if status:
             if status.lower() == 'entregue':
                 # Pedidos entregues: "Recebimento com assinatura normal", "Assinatura de devolução", ou "entregue"
-                additional_conditions.append({
-                    'marca_assinatura': {
-                        '$regex': 'recebimento com assinatura normal|assinatura de devolução|^entregue$',
-                        '$options': 'i'
+                pipeline.append({
+                    '$match': {
+                        'marca_assinatura': {
+                            '$regex': 'recebimento com assinatura normal|assinatura de devolução|^entregue$',
+                            '$options': 'i'
+                        }
                     }
                 })
             elif status.lower() == 'nao_entregue':
                 # Pedidos não entregues
-                additional_conditions.append({
-                    'marca_assinatura': {
-                        '$regex': 'não entregue|nao entregue',
-                        '$options': 'i'
+                pipeline.append({
+                    '$match': {
+                        'marca_assinatura': {
+                            '$regex': 'não entregue|nao entregue',
+                            '$options': 'i'
+                        }
                     }
                 })
         
-        # Combinar todas as condições
-        if base_conditions or additional_conditions:
-            and_conditions = [{'responsavel_entrega': motorista_decoded}]
-            
-            if base_conditions:
-                and_conditions.append({'$or': base_conditions})
-            
-            and_conditions.extend(additional_conditions)
-            
-            query = {'$and': and_conditions}
+        # Ordenar resultado final por tempo de digitalização (mais recente primeiro)
+        pipeline.append({'$sort': {'tempo_digitalizacao': -1}})
         
-        # Buscar dados
-        cursor = collection.find(query).sort('tempo_digitalizacao', -1)
+        # Executar pipeline
         documentos = []
-        
-        async for doc in cursor:
+        async for doc in collection.aggregate(pipeline):
             # Converter ObjectId para string
             doc['_id'] = str(doc['_id'])
             # Converter datetime para string
@@ -625,8 +746,8 @@ async def salvar_status_motorista(
         if db is None:
             raise HTTPException(status_code=500, detail="Database não está conectado")
         
-        # Usar a mesma coleção de status dos motoristas
-        collection_name = "motoristas_status"
+        # Usar coleção específica para status dos motoristas D1
+        collection_name = "motoristas_status_d1"
         collection = db[collection_name]
         
         status_value = status_data.get("status")  # Pode ser 'OK', 'NAO RETORNOU POSSIVEL EXTRAVIO', 'PENDENTE', 'NUMERO ERRADO OU SEM DDD OU INCORRETO' ou null
@@ -672,7 +793,7 @@ async def salvar_status_motorista(
                     detail=f"Status inválido: {status_value}. Valores permitidos: {', '.join(STATUS_VALIDOS)}"
                 )
             
-            # Obter observação se fornecida
+            # Obter observação se fornecida (sempre incluir campo, mesmo que vazio, para permitir remoção)
             observacao = status_data.get("observacao", "")
             
             # Atualizar ou criar documento com chave composta (motorista + base)
@@ -680,12 +801,9 @@ async def salvar_status_motorista(
                 "responsavel": motorista_value,
                 "base": base,
                 "status": status_value,
+                "observacao": observacao,  # Sempre incluir campo observacao (pode ser vazio para remover)
                 "updated_at": datetime.now()
             }
-            
-            # Adicionar observação se fornecida
-            if observacao:
-                doc["observacao"] = observacao
             
             if existing:
                 # Atualizar existente
@@ -711,42 +829,6 @@ async def salvar_status_motorista(
         raise
     except Exception as e:
         logger.error(f"Erro ao salvar status do motorista: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
-
-@router.get("/bipagens/motorista/all-status")
-async def obter_todos_status_d1():
-    """
-    Obtém todos os status salvos dos motoristas D1 (para carregar observações ao iniciar)
-    """
-    try:
-        db = get_database()
-        if db is None:
-            raise HTTPException(status_code=500, detail="Database não está conectado")
-        
-        collection_name = "motoristas_status"
-        collection = db[collection_name]
-        
-        # Buscar todos os status (filtrar apenas os que têm base relacionada a D1 ou sem base específica)
-        # Como D1 usa a mesma coleção, vamos retornar todos e o frontend filtra
-        cursor = collection.find({})
-        statuses = []
-        
-        async for doc in cursor:
-            # Remover _id do MongoDB para serialização
-            doc.pop('_id', None)
-            # Garantir que tenha o campo responsavel (pode ser motorista ou responsavel)
-            if 'motorista' in doc and 'responsavel' not in doc:
-                doc['responsavel'] = doc['motorista']
-            statuses.append(doc)
-        
-        return {
-            "success": True,
-            "statuses": statuses,
-            "total": len(statuses)
-        }
-        
-    except Exception as e:
-        logger.error(f"Erro ao obter todos os status D1: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
 @router.post("/bipagens/table-config/{table_id}")
@@ -878,7 +960,7 @@ async def obter_status_motorista(motorista: str, base: str | None = None):
         if db is None:
             raise HTTPException(status_code=500, detail="Database não está conectado")
         
-        collection_name = "motoristas_status"
+        collection_name = "motoristas_status_d1"
         collection = db[collection_name]
         
         # Buscar usando chave composta (motorista + base)
@@ -903,6 +985,7 @@ async def obter_status_motorista(motorista: str, base: str | None = None):
                 "status": doc.get("status"),
                 "motorista": doc.get("responsavel"),
                 "base": doc.get("base"),
+                "observacao": doc.get("observacao", ""),
                 "updated_at": doc.get("updated_at")
             }
         else:

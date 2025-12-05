@@ -12,6 +12,7 @@ from .sla_bases import router as sla_bases_router
 from .sla_calculator import router as sla_calculator_router
 from .pedidos_galpao import router as pedidos_galpao_router
 from .motorista_status import router as motorista_status_router
+from .relatorio import router as relatorio_router
 
 # Router principal com prefixo e tags
 router = APIRouter(prefix="/api/sla", tags=["SLA"])
@@ -26,3 +27,4 @@ router.include_router(sla_bases_router)
 router.include_router(sla_calculator_router)
 router.include_router(pedidos_galpao_router)
 router.include_router(motorista_status_router)
+router.include_router(relatorio_router)

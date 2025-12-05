@@ -33,7 +33,7 @@ async def gerar_relatorio_contato(
 ):
     """
     📊 GERA RELATÓRIO EXCEL DE CONTATO COM MOTORISTAS
-    Retorna arquivo Excel com: Base, Nome do Motorista, Total, Total Entregue, Total Não Entregue, Status
+    Retorna arquivo Excel com: Base, Nome do Motorista, Total, Total Entregue, Total Não Entregue, Status, Observação
     """
     try:
         db = get_database()
@@ -106,9 +106,10 @@ async def gerar_relatorio_contato(
                 
                 total_validos += 1
         
-        # Buscar status dos motoristas
-        motoristas_status_collection = db["motoristas_status"]
+        # Buscar status e observações dos motoristas (Pedidos Retidos)
+        motoristas_status_collection = db["motoristas_status_pedidos_retidos"]
         status_map = {}
+        observacoes_map = {}
         
         for key_motorista, data in stats.items():
             responsavel = data["responsavel"]
@@ -130,6 +131,7 @@ async def gerar_relatorio_contato(
                 })
             
             status_map[key_motorista] = status_doc.get("status", "") if status_doc else ""
+            observacoes_map[key_motorista] = status_doc.get("observacao", "") if status_doc else ""
         
         # Criar arquivo Excel
         wb = Workbook()
@@ -148,7 +150,7 @@ async def gerar_relatorio_contato(
         center_alignment = Alignment(horizontal='center', vertical='center')
         
         # Cabeçalhos
-        headers = ["Base", "Nome do Motorista", "Total", "Total Entregue", "Total Não Entregue", "Status"]
+        headers = ["Base", "Nome do Motorista", "Total", "Total Entregue", "Total Não Entregue", "Status", "Observação"]
         for col_idx, header in enumerate(headers, start=1):
             cell = ws.cell(row=1, column=col_idx, value=header)
             cell.fill = header_fill
@@ -163,6 +165,7 @@ async def gerar_relatorio_contato(
         for row_idx, data in enumerate(data_list, start=2):
             key_motorista = f"{data['responsavel']}||{data['base']}" if data['base'] else data['responsavel']
             status = status_map.get(key_motorista, "")
+            observacao = observacoes_map.get(key_motorista, "")
             
             ws.cell(row=row_idx, column=1, value=data["base"] or "N/A").border = border
             ws.cell(row=row_idx, column=2, value=data["responsavel"]).border = border
@@ -170,10 +173,14 @@ async def gerar_relatorio_contato(
             ws.cell(row=row_idx, column=4, value=data["entregues"]).border = border
             ws.cell(row=row_idx, column=5, value=data["nao_entregues"]).border = border
             ws.cell(row=row_idx, column=6, value=status).border = border
+            ws.cell(row=row_idx, column=7, value=observacao).border = border
             
             # Alinhar números ao centro
             for col in [3, 4, 5]:
                 ws.cell(row=row_idx, column=col).alignment = center_alignment
+            
+            # Alinhar observação à esquerda (texto longo)
+            ws.cell(row=row_idx, column=7).alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
         
         # Ajustar largura das colunas
         ws.column_dimensions['A'].width = 20
@@ -182,6 +189,7 @@ async def gerar_relatorio_contato(
         ws.column_dimensions['D'].width = 15
         ws.column_dimensions['E'].width = 20
         ws.column_dimensions['F'].width = 35
+        ws.column_dimensions['G'].width = 50  # Coluna de Observação (mais larga para texto longo)
         
         # Congelar primeira linha
         ws.freeze_panes = 'A2'

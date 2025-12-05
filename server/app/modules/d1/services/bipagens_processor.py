@@ -61,7 +61,7 @@ class BipagensProcessor:
             ]
             
             # Colunas opcionais mas importantes
-            optional_columns = ['Digitalizador', 'Base Destino']
+            optional_columns = ['Digitalizador', 'Base Destino', 'Base de escaneamento']
             
             missing_columns = [col for col in required_columns if col not in headers]
             if missing_columns:
@@ -70,11 +70,12 @@ class BipagensProcessor:
             # Verificar se colunas opcionais existem
             has_digitalizador = 'Digitalizador' in headers
             has_base_destino = 'Base Destino' in headers
+            has_base_escaneamento = 'Base de escaneamento' in headers
             
             if not has_digitalizador:
                 logger.warning("⚠️ Coluna 'Digitalizador' não encontrada. Pedidos sem motorista não serão processados corretamente.")
-            if not has_base_destino:
-                logger.warning("⚠️ Coluna 'Base Destino' não encontrada. Pedidos sem motorista não terão base correta.")
+            if not has_base_destino and not has_base_escaneamento:
+                logger.warning("⚠️ Colunas 'Base Destino' ou 'Base de escaneamento' não encontradas. Validação de base não será aplicada.")
             
             # Ler dados de forma otimizada (processar em lotes para grandes arquivos)
             dados_brutos = []
@@ -187,44 +188,27 @@ class BipagensProcessor:
             item['_tempo_digitalizacao'] = tempo_digitalizacao
             pedidos_agrupados[numero_pedido].append(item)
         
-        # Para cada pedido, escolher o melhor registro
+        # Para cada pedido, escolher o registro mais recente (independente de ter motorista ou não)
+        # REGRA: Sempre usar a bipagem mais recente. Se ela não tem motorista, o pedido não está com motorista.
         pedidos_finais = []
         
         for numero_pedido, registros in pedidos_agrupados.items():
             # Ordenar por data (mais recente primeiro)
             registros.sort(key=lambda x: x['_tempo_digitalizacao'], reverse=True)
             
-            # Verificar se algum registro tem "Correio de coleta ou entrega" preenchido
-            registros_com_motorista = []
-            registros_sem_motorista = []
+            # SEMPRE pegar o registro mais recente (independente de ter motorista ou não)
+            melhor_registro = registros[0]
+            tipo_bipagem = melhor_registro.get('Tipo de bipagem', '')
+            correio = str(melhor_registro.get('Correio de coleta ou entrega', '')).strip()
+            tem_motorista = correio and correio != ''
             
-            for registro in registros:
-                correio = str(registro.get('Correio de coleta ou entrega', '')).strip()
-                tem_motorista = correio and correio != ''
-                
-                if tem_motorista:
-                    registros_com_motorista.append(registro)
-                else:
-                    registros_sem_motorista.append(registro)
-            
-            # Escolher o melhor registro:
-            # 1. Se houver registros com motorista, pegar o mais recente que tenha motorista
-            # 2. Se não houver nenhum com motorista, pegar o mais recente (mesmo sem motorista)
-            if registros_com_motorista:
-                # Pegar o mais recente que tenha motorista
-                melhor_registro = registros_com_motorista[0]
-                tipo_bipagem = melhor_registro.get('Tipo de bipagem', '')
-                correio = str(melhor_registro.get('Correio de coleta ou entrega', '')).strip()
-                logger.info(f"✅ Pedido {numero_pedido}: Escolhido registro COM MOTORISTA - Tipo: {tipo_bipagem}, Motorista: {correio}, Data: {melhor_registro['_tempo_digitalizacao']}")
-                if len(registros_com_motorista) > 1:
-                    logger.info(f"   ℹ️ Total de {len(registros_com_motorista)} registros com motorista encontrados para este pedido")
+            if tem_motorista:
+                logger.info(f"✅ Pedido {numero_pedido}: Bipagem mais recente COM MOTORISTA - Tipo: {tipo_bipagem}, Motorista: {correio}, Data: {melhor_registro['_tempo_digitalizacao']}")
+                melhor_registro['_tem_motorista'] = True
             else:
-                # Se não houver nenhum com motorista, pegar o mais recente
-                melhor_registro = registros[0]
-                tipo_bipagem = melhor_registro.get('Tipo de bipagem', '')
-                logger.warning(f"⚠️ Pedido {numero_pedido}: NENHUM registro com motorista encontrado! Total de registros: {len(registros)}")
-                logger.warning(f"   ⚠️ Usando o mais recente (Tipo: {tipo_bipagem}, Data: {melhor_registro['_tempo_digitalizacao']})")
-                logger.warning(f"   ⚠️ Este pedido NÃO será salvo na coleção (sem motorista)")
+                logger.info(f"📦 Pedido {numero_pedido}: Bipagem mais recente SEM MOTORISTA - Tipo: {tipo_bipagem}, Data: {melhor_registro['_tempo_digitalizacao']}")
+                logger.info(f"   ℹ️ Pedido não está com motorista (entrou no galpão ou não foi atribuído)")
+                melhor_registro['_tem_motorista'] = False
             
             # Remover campo auxiliar
             melhor_registro.pop('_tempo_digitalizacao', None)
@@ -300,43 +284,89 @@ class BipagensProcessor:
                 continue  # Pular pedidos filhos
             
             # Verificar se "Correio de coleta ou entrega" está preenchido
-            # Com a nova lógica de deduplicação, sempre escolhemos um registro com motorista se houver
-            # Mas ainda verificamos aqui como segurança
             correio = str(item_bipagem.get('Correio de coleta ou entrega', '')).strip()
             correio_vazio = not correio or correio == '' or correio.strip() == ''
             
-            if correio_vazio:
-                tipo_bipagem = item_bipagem.get('Tipo de bipagem', '')
-                logger.warning(f"⚠️ Pedido {numero_pedido} SEM MOTORISTA após deduplicação - Tipo: {tipo_bipagem}, Correio vazio. NÃO será salvo na coleção.")
-                logger.warning(f"   ⚠️ Isso pode indicar que todos os registros deste pedido não tinham motorista.")
-                continue
-            
-            # Buscar pedido no dicionário
+            # Buscar dados do d1_chunks para validações extras
             pedido_encontrado = pedidos_encontrados.get(numero_pedido)
             
             if not pedido_encontrado:
                 logger.warning(f"⚠️ Pedido {numero_pedido} não encontrado em d1_chunks")
                 continue
             
-            # FLUXO: "Correio de coleta ou entrega" tem valor → pedido está COM MOTORISTA
-            # Usar Correio como responsável (dado mais atualizado do último bipe)
+            # Dados do d1_chunks
+            responsavel_entrega_chunks = str(pedido_encontrado.get('Responsável pela entrega', '')).strip()
+            base_entrega_chunks = str(pedido_encontrado.get('Base de entrega', '')).strip()
+            
+            # Dados do arquivo de bipagens
+            digitalizador = str(item_bipagem.get('Digitalizador', '')).strip()
+            tipo_bipagem = str(item_bipagem.get('Tipo de bipagem', '')).strip()
+            base_destino = str(item_bipagem.get('Base Destino', '')).strip()
+            base_escaneamento = str(item_bipagem.get('Base de escaneamento', '')).strip()
+            
+            # Usar "Base de escaneamento" se disponível, senão usar "Base Destino"
+            base_escaneamento_final = base_escaneamento if base_escaneamento else base_destino
+            
+            # VALIDAÇÃO 1: Verificar se bases são iguais
+            bases_iguais = False
+            if base_escaneamento_final and base_entrega_chunks:
+                base_escaneamento_normalizada = base_escaneamento_final.strip().upper()
+                base_entrega_normalizada = base_entrega_chunks.strip().upper()
+                bases_iguais = base_escaneamento_normalizada == base_entrega_normalizada
+            
+            # VALIDAÇÃO 2: Verificar se "Digitalizador" = "Responsável pela entrega" (do d1_chunks)
+            digitalizador_igual_responsavel = False
+            if digitalizador and responsavel_entrega_chunks:
+                digitalizador_normalizado = digitalizador.strip().upper()
+                responsavel_normalizado = responsavel_entrega_chunks.strip().upper()
+                digitalizador_igual_responsavel = digitalizador_normalizado == responsavel_normalizado
+            
+            # VALIDAÇÃO 3: Verificar se "Tipo de bipagem" = "bipe de pacote problemático"
+            tipo_bipagem_problematico = False
+            if tipo_bipagem:
+                tipo_bipagem_normalizado = tipo_bipagem.strip().upper()
+                tipo_bipagem_problematico = 'bipe de pacote problemático' in tipo_bipagem_normalizado or 'pacote problemático' in tipo_bipagem_normalizado
+            
+            # Determinar se pedido está com motorista:
+            # 1. "Correio de coleta ou entrega" preenchido E bases iguais
+            # 2. OU "Digitalizador" = "Responsável pela entrega" E "Correio" vazio E bases iguais
+            # 3. OU "Tipo de bipagem" = "bipe de pacote problemático" E bases iguais
+            esta_com_motorista = False
+            responsavel_final = ''
+            
+            if bases_iguais:
+                if not correio_vazio:
+                    # Caso 1: Correio preenchido
+                    esta_com_motorista = True
+                    responsavel_final = correio
+                    logger.info(f"📋 Pedido {numero_pedido} COM MOTORISTA (Correio preenchido) - Motorista: {correio}, Base: {base_entrega_chunks}")
+                elif digitalizador_igual_responsavel:
+                    # Caso 2: Digitalizador = Responsável pela entrega
+                    esta_com_motorista = True
+                    responsavel_final = responsavel_entrega_chunks
+                    logger.info(f"📋 Pedido {numero_pedido} COM MOTORISTA (Digitalizador = Responsável) - Motorista: {responsavel_entrega_chunks}, Base: {base_entrega_chunks}")
+                elif tipo_bipagem_problematico:
+                    # Caso 3: Tipo de bipagem = "bipe de pacote problemático"
+                    esta_com_motorista = True
+                    # Usar responsável do d1_chunks se disponível, senão usar digitalizador
+                    responsavel_final = responsavel_entrega_chunks if responsavel_entrega_chunks else digitalizador
+                    logger.info(f"📋 Pedido {numero_pedido} COM MOTORISTA (Bipe de pacote problemático) - Motorista: {responsavel_final}, Base: {base_entrega_chunks}")
+                else:
+                    # Sem motorista
+                    logger.info(f"📦 Pedido {numero_pedido} SEM MOTORISTA - Base escaneamento: {base_escaneamento_final}, Base entrega: {base_entrega_chunks}")
+            else:
+                # Bases diferentes = sem motorista
+                logger.info(f"📦 Pedido {numero_pedido} SEM MOTORISTA (bases diferentes) - Base escaneamento: {base_escaneamento_final}, Base entrega: {base_entrega_chunks}")
             
             tempo_digitalizacao = item_bipagem.get('Tempo de digitalização')
-            digitalizador = str(item_bipagem.get('Digitalizador', '')).strip()
-            base_destino = str(item_bipagem.get('Base Destino', '')).strip()
             
-            # "Correio de coleta ou entrega" do último bipe tem valor → pedido está COM MOTORISTA
-            # Usar Correio como responsável (dado mais atualizado do último bipe)
-            responsavel_final = correio
-            base_final = pedido_encontrado.get('Base de entrega', '')
-            
-            # Se base_final estiver vazio, tentar usar base_destino como fallback
-            if not base_final or (isinstance(base_final, str) and base_final.strip() == ''):
-                base_final = base_destino if base_destino else ''
-            
-            logger.info(f"📋 Pedido {numero_pedido} (ÚLTIMO BIPE) COM MOTORISTA - Correio: {correio}, Base: {base_final}")
+            # Definir base_final (usar base_entrega_chunks, com fallback para base_escaneamento_final)
+            base_final = base_entrega_chunks if base_entrega_chunks else base_escaneamento_final
             
             # Mesclar dados
+            # Atualizar "Correio de coleta ou entrega" com o responsavel_final (pode ser do correio, digitalizador ou d1_chunks)
+            correio_final = responsavel_final if esta_com_motorista else correio
+            
             dados_finais = {
                 'Número de pedido JMS': numero_pedido,
                 'Base de entrega': base_final,
@@ -351,10 +381,13 @@ class BipagensProcessor:
                 'Cidade Destino': pedido_encontrado.get('Cidade Destino', ''),
                 '3 Segmentos': pedido_encontrado.get('3 Segmentos', ''),
                 'Tempo de digitalização': tempo_digitalizacao,
-                'Correio de coleta ou entrega': correio,
-                'Tipo de bipagem': item_bipagem.get('Tipo de bipagem', ''),
-                'Digitalizador': '',
-                'Base Destino': ''
+                'Correio de coleta ou entrega': correio_final,  # Usar responsavel_final se tiver motorista
+                'Tipo de bipagem': tipo_bipagem,
+                'Digitalizador': digitalizador,
+                'Base Destino': base_escaneamento_final,
+                'Base de escaneamento': base_escaneamento_final,
+                '_esta_com_motorista': esta_com_motorista,  # Flag auxiliar para uso no salvamento
+                '_responsavel_entrega_chunks_original': responsavel_entrega_chunks  # Salvar original do d1_chunks para validações no fallback
             }
             
             dados_completos.append(dados_finais)
@@ -462,11 +495,37 @@ class BipagensProcessor:
                         except:
                             continue
                 
+                # Usar flag _esta_com_motorista se disponível (já calculada no processamento)
+                # Caso contrário, recalcular usando a mesma lógica
+                if '_esta_com_motorista' in item:
+                    esta_com_motorista_final = item['_esta_com_motorista']
+                    responsavel_entrega_valor = item.get('Responsável pela entrega', '')
+                else:
+                    # Fallback: recalcular validação
+                    correio_valor = item.get('Correio de coleta ou entrega', '')
+                    correio_preenchido = bool(correio_valor and str(correio_valor).strip() != '')
+                    
+                    # VALIDAÇÃO ROBUSTA: Verificar se Base de escaneamento é igual a Base de entrega
+                    base_entrega_valor = item.get('Base de entrega', '')
+                    base_escaneamento_valor = item.get('Base de escaneamento', '') or item.get('Base Destino', '')
+                    
+                    bases_iguais = True
+                    if base_escaneamento_valor and base_entrega_valor:
+                        base_escaneamento_normalizada = str(base_escaneamento_valor).strip().upper()
+                        base_entrega_normalizada = str(base_entrega_valor).strip().upper()
+                        bases_iguais = base_escaneamento_normalizada == base_entrega_normalizada
+                    
+                    # Se as bases forem diferentes, considerar como SEM MOTORISTA
+                    esta_com_motorista_final = correio_preenchido and bases_iguais
+                    
+                    # Se "Correio de coleta ou entrega" está vazio OU bases são diferentes, responsavel_entrega fica vazio
+                    responsavel_entrega_valor = str(correio_valor).strip() if esta_com_motorista_final else ''
+                
                 documento = {
                     'numero_pedido_jms': numero_pedido,
                     'base_entrega': item.get('Base de entrega', ''),
                     'horario_saida_entrega': item.get('Horário de saída para entrega', ''),
-                    'responsavel_entrega': item.get('Responsável pela entrega', ''),
+                    'responsavel_entrega': responsavel_entrega_valor,  # Vazio se não tem motorista
                     'marca_assinatura': item.get('Marca de assinatura', ''),
                     'cep_destino': item.get('CEP destino', ''),
                     'motivos_pacotes_problematicos': item.get('Motivos dos pacotes problemáticos', ''),
@@ -479,7 +538,8 @@ class BipagensProcessor:
                     'tempo_pedido_parado': item.get('Tempo de Pedido parado', ''),
                     'digitalizador': item.get('Digitalizador', ''),
                     'base_destino': item.get('Base Destino', ''),
-                    'esta_com_motorista': bool(item.get('Correio de coleta ou entrega') and str(item.get('Correio de coleta ou entrega', '')).strip() != ''),
+                    'base_escaneamento': item.get('Base de escaneamento', '') or item.get('Base Destino', ''),
+                    'esta_com_motorista': esta_com_motorista_final,  # True apenas se "Correio" preenchido E bases iguais
                     'updated_at': hoje
                 }
                 
@@ -520,11 +580,62 @@ class BipagensProcessor:
                                     except:
                                         continue
                             
+                            # Usar flag _esta_com_motorista se disponível (já calculada no processamento)
+                            if '_esta_com_motorista' in item:
+                                esta_com_motorista_fallback = item['_esta_com_motorista']
+                                responsavel_entrega_fallback = item.get('Responsável pela entrega', '')
+                            else:
+                                # Fallback: recalcular validação completa
+                                correio_valor_fallback = item.get('Correio de coleta ou entrega', '')
+                                correio_vazio_fallback = not correio_valor_fallback or str(correio_valor_fallback).strip() == ''
+                                
+                                base_entrega_valor_fallback = item.get('Base de entrega', '')
+                                base_escaneamento_valor_fallback = item.get('Base de escaneamento', '') or item.get('Base Destino', '')
+                                digitalizador_fallback = str(item.get('Digitalizador', '')).strip()
+                                tipo_bipagem_fallback = str(item.get('Tipo de bipagem', '')).strip()
+                                # Usar o responsável original do d1_chunks se disponível, senão usar o processado
+                                responsavel_entrega_chunks_fallback = str(item.get('_responsavel_entrega_chunks_original', '') or item.get('Responsável pela entrega', '')).strip()
+                                
+                                # VALIDAÇÃO 1: Verificar se bases são iguais
+                                bases_iguais_fallback = False
+                                if base_escaneamento_valor_fallback and base_entrega_valor_fallback:
+                                    base_escaneamento_normalizada_fallback = str(base_escaneamento_valor_fallback).strip().upper()
+                                    base_entrega_normalizada_fallback = str(base_entrega_valor_fallback).strip().upper()
+                                    bases_iguais_fallback = base_escaneamento_normalizada_fallback == base_entrega_normalizada_fallback
+                                
+                                # VALIDAÇÃO 2: Verificar se "Digitalizador" = "Responsável pela entrega"
+                                digitalizador_igual_responsavel_fallback = False
+                                if digitalizador_fallback and responsavel_entrega_chunks_fallback:
+                                    digitalizador_normalizado_fallback = digitalizador_fallback.strip().upper()
+                                    responsavel_normalizado_fallback = responsavel_entrega_chunks_fallback.strip().upper()
+                                    digitalizador_igual_responsavel_fallback = digitalizador_normalizado_fallback == responsavel_normalizado_fallback
+                                
+                                # VALIDAÇÃO 3: Verificar se "Tipo de bipagem" = "bipe de pacote problemático"
+                                tipo_bipagem_problematico_fallback = False
+                                if tipo_bipagem_fallback:
+                                    tipo_bipagem_normalizado_fallback = tipo_bipagem_fallback.strip().upper()
+                                    tipo_bipagem_problematico_fallback = 'bipe de pacote problemático' in tipo_bipagem_normalizado_fallback or 'pacote problemático' in tipo_bipagem_normalizado_fallback
+                                
+                                # Determinar se está com motorista (mesma lógica do processamento principal)
+                                esta_com_motorista_fallback = False
+                                if bases_iguais_fallback:
+                                    if not correio_vazio_fallback:
+                                        esta_com_motorista_fallback = True
+                                        responsavel_entrega_fallback = str(correio_valor_fallback).strip()
+                                    elif digitalizador_igual_responsavel_fallback:
+                                        esta_com_motorista_fallback = True
+                                        responsavel_entrega_fallback = responsavel_entrega_chunks_fallback
+                                    elif tipo_bipagem_problematico_fallback:
+                                        esta_com_motorista_fallback = True
+                                        responsavel_entrega_fallback = responsavel_entrega_chunks_fallback if responsavel_entrega_chunks_fallback else digitalizador_fallback
+                                else:
+                                    responsavel_entrega_fallback = ''
+                            
                             documento = {
                                 'numero_pedido_jms': numero_pedido,
                                 'base_entrega': item.get('Base de entrega', ''),
                                 'horario_saida_entrega': item.get('Horário de saída para entrega', ''),
-                                'responsavel_entrega': item.get('Responsável pela entrega', ''),
+                                'responsavel_entrega': responsavel_entrega_fallback,
                                 'marca_assinatura': item.get('Marca de assinatura', ''),
                                 'cep_destino': item.get('CEP destino', ''),
                                 'motivos_pacotes_problematicos': item.get('Motivos dos pacotes problemáticos', ''),
@@ -537,7 +648,8 @@ class BipagensProcessor:
                                 'tempo_pedido_parado': item.get('Tempo de Pedido parado', ''),
                                 'digitalizador': item.get('Digitalizador', ''),
                                 'base_destino': item.get('Base Destino', ''),
-                                'esta_com_motorista': bool(item.get('Correio de coleta ou entrega') and str(item.get('Correio de coleta ou entrega', '')).strip() != ''),
+                                'base_escaneamento': item.get('Base de escaneamento', '') or item.get('Base Destino', ''),
+                                'esta_com_motorista': esta_com_motorista_fallback,
                                 'updated_at': hoje
                             }
                             
