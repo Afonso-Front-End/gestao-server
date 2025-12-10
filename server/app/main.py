@@ -20,6 +20,7 @@ from app.modules.retidos.routes import router as pedidos_retidos_router
 from app.modules.telefones.routes import router as lista_telefones_router
 from app.modules.sla.routes import router as sla_router
 from app.modules.d1.routes import router as d1_router
+from app.modules.sem_movimentacao_sc.routes import router as sem_movimentacao_sc_router
 from app.modules.reports import router as reports_router
 from app.routes.admin import router as admin_router
 
@@ -93,6 +94,7 @@ app.include_router(lista_telefones_router)
 app.include_router(reports_router)
 app.include_router(sla_router)
 app.include_router(d1_router)
+app.include_router(sem_movimentacao_sc_router)
 
 # Rota admin (sem proteção de admin, apenas autenticação JWT normal)
 app.include_router(admin_router)

@@ -41,3 +41,9 @@ COLLECTION_SLA_CHUNKS = "sla_chunks"  # Chunks dos arquivos SLA
 COLLECTION_D1_MAIN = "d1_main"  # Documento principal/metadados
 COLLECTION_D1_CHUNKS = "d1_chunks"  # Chunks dos dados D-1
 COLLECTION_D1_BIPAGENS = "d1_bipagens"  # Dados de bipagens em tempo real processados
+
+# ========================================
+# SEM MOVIMENTAÇÃO SC
+# ========================================
+COLLECTION_SEM_MOVIMENTACAO_SC = "sem_movimentacao_sc"  # Documento principal/metadados
+COLLECTION_SEM_MOVIMENTACAO_SC_CHUNKS = "sem_movimentacao_sc_chunks"  # Chunks dos dados
